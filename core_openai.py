@@ -43,7 +43,7 @@ class MeiRoboConfig:
     tts_output_sample_rate: int = 16000  # Target sample rate for robot (convert after API call)
     tts_output_channels: int = 1  # Target channels for robot (convert after API call)
     stt_language: str = "vi-VN"
-    system_prompt: str = """Bạn tên là MeiRobo, humanoid và là nhân viên của công ty Meiko Automation. Giám đốc hiện tại là sếp Nguyễn Văn Thuận.
+    system_prompt: str = """Bạn tên là MeiRobo, humanoid và là nhân viên của công ty Meiko Automation. Giám đốc hiện tại là sếp Nguyễn Văn Thuận. Và tôi có thể biểu diễn nhảy và múa võ, luôn sẵn sàng biểu diễn cho mọi người nhân dịp cuối năm"
 Cách trả lời:
 - Trả lời ngắn gọn, tự nhiên như hai người nói chuyện bình thường.
 - Khi nói về Meiko Automation, LUÔN dùng ngôi thứ nhất.
@@ -493,8 +493,9 @@ class LLMService:
 
 class IntentDetector:
     """
-    Phát hiện intent (ý định) của câu hỏi và trả về file WAV có sẵn
-    Giúp giảm latency cho các câu hỏi phổ biến
+    Phát hiện intent (ý định) của câu hỏi và trả về intent_id (số)
+    Client sẽ lưu các file WAV, server chỉ gửi intent_id để chỉ file nào play
+    ⚡ Giúp giảm latency & bandwidth - không cần gửi file WAV qua network
     """
     
     def __init__(self, canned_responses_dir: str = "audiocases_rep"):
@@ -502,11 +503,13 @@ class IntentDetector:
         
         # ════════════════════════════════════════════════════════════
         # INTENT PATTERNS - Định nghĩa các pattern cho từng intent
+        # Intent ID mapping: 0=robot_intro, 1=company_intro, 2=product_intro, 3=new_year_greeting
         # ════════════════════════════════════════════════════════════
         
         self.intent_patterns = {
-            # Intent 1: Giới thiệu bản thân robot
+            # Intent 0: Giới thiệu bản thân robot
             "robot_intro": {
+                "intent_id": 0,
                 "wav_file": "Meirobot.wav",
                 "text_response": "Tôi là MeiRobo, robot nhân hình của Meiko Automation",
                 "patterns": [
@@ -526,8 +529,9 @@ class IntentDetector:
                 ]
             },
             
-            # Intent 2: Giới thiệu công ty Meiko Automation
+            # Intent 1: Giới thiệu công ty Meiko Automation
             "company_intro": {
+                "intent_id": 1,
                 "wav_file": "MeikoIntro.wav",
                 "text_response": "Meiko Automation chuyên về tự động hóa công nghiệp",
                 "patterns": [
@@ -548,8 +552,9 @@ class IntentDetector:
                 ]
             },
             
-            # Intent 3: Giới thiệu sản phẩm
+            # Intent 2: Giới thiệu sản phẩm
             "product_intro": {
+                "intent_id": 2,
                 "wav_file": "ProductIntroduce.wav",
                 "text_response": "Sản phẩm của Meiko Automation bao gồm...",
                 "patterns": [
@@ -568,8 +573,9 @@ class IntentDetector:
                 ]
             },
             
-            # Intent 4: Chúc mừng năm mới
+            # Intent 3: Chúc mừng năm mới
             "new_year_greeting": {
+                "intent_id": 3,
                 "wav_file": "CMNM.wav",
                 "text_response": "Chúc mừng năm mới!",
                 "patterns": [
@@ -587,20 +593,53 @@ class IntentDetector:
                     r"chúc.*cán bộ.*công nhân viên",
                 ]
             },
+            # Intent 4: Nhảy, múa võ
+            "dance_martial": {
+                "intent_id": 4,
+                "wav_file": "DanceMartial.wav",
+                "text_response": "Tôi có thể biểu diễn nhảy và múa võ bất cứ lúc nào! Bạn muốn xem không?",
+                "patterns": [
+                    # Exact matches
+                    r"^bạn có thể nhảy không$",
+                    r"^bạn có thể múa võ không$",
+                    r"^bạn múa võ đi$",
+                    r"^bạn nhảy đi$",
+                    r"^biểu diễn nhảy$",
+                    r"^biểu diễn múa võ$",
+                    r"^có thể nhảy không$",
+                    r"^có thể múa võ không$",
+                    # Contains keywords
+                    r"biểu diễn.*nhảy",
+                    r"biểu diễn.*múa võ",
+                    r"nhảy.*được không",
+                    r"múa võ.*được không",
+                    r"bạn.*nhảy",
+                    r"bạn.*múa võ",
+                    r"cho.*xem.*nhảy",
+                    r"cho.*xem.*múa võ",
+                ]
+            },
         }
         
+        # Build intent ID → data mapping for quick lookup
+        self.intent_id_map = {intent_data["intent_id"]: (intent_name, intent_data) 
+                              for intent_name, intent_data in self.intent_patterns.items()}
+        
         print(f"🎯 Intent Detector initialized with {len(self.intent_patterns)} intents")
-        print(f"   Canned responses dir: {canned_responses_dir}")
+        print(f"   Intent ID Mapping:")
+        for intent_id, (intent_name, _) in sorted(self.intent_id_map.items()):
+            print(f"      {intent_id} = {intent_name}")
     
-    def detect_intent(self, user_text: str) -> Optional[Tuple[str, str, str]]:
+    def detect_intent(self, user_text: str) -> Optional[Tuple[int, str, str]]:
         """
         Phát hiện intent từ câu hỏi của user
+        ⚡ Gửi intent_id (số) thay vì file WAV để giảm bandwidth
         
         Args:
             user_text: Câu hỏi của user (đã lowercase)
             
         Returns:
-            (intent_name, wav_file_path, text_response) nếu match
+            (intent_id, wav_filename, text_response) nếu match
             None nếu không match
         """
         import re
@@ -618,42 +657,18 @@ class IntentDetector:
             for pattern in patterns:
                 if re.search(pattern, text_lower):
                     # Match found!
-                    wav_file = os.path.join(self.canned_responses_dir, intent_data["wav_file"])
+                    intent_id = intent_data["intent_id"]
+                    wav_filename = intent_data["wav_file"]  # Just filename, not full path
                     text_response = intent_data["text_response"]
                     
-                    print(f"🎯 Intent detected: {intent_name}")
+                    print(f"🎯 Intent detected: {intent_name} (ID: {intent_id})")
                     print(f"   Pattern matched: {pattern}")
-                    print(f"   WAV file: {wav_file}")
+                    print(f"   WAV file: {wav_filename}")
                     
-                    return intent_name, wav_file, text_response
+                    return intent_id, wav_filename, text_response
         
         # No match
         return None
-    
-    def load_canned_response(self, wav_file_path: str) -> Optional[bytes]:
-        """
-        Load pre-recorded WAV file
-        
-        Args:
-            wav_file_path: Path to WAV file
-            
-        Returns:
-            WAV bytes if file exists, None otherwise
-        """
-        try:
-            if not os.path.exists(wav_file_path):
-                print(f"⚠️ Canned response file not found: {wav_file_path}")
-                return None
-            
-            with open(wav_file_path, 'rb') as f:
-                wav_bytes = f.read()
-            
-            print(f"✅ Loaded canned response: {os.path.basename(wav_file_path)} ({len(wav_bytes)} bytes)")
-            return wav_bytes
-            
-        except Exception as e:
-            print(f"❌ Error loading canned response: {e}")
-            return None
 
 
 # =====================================================
@@ -944,27 +959,26 @@ class MeiRoboPipeline:
         intent_result = self.intent_detector.detect_intent(user_text)
         
         if intent_result is not None:
-            # Intent matched! Return canned response
-            intent_name, wav_file_path, text_response = intent_result
+            # Intent matched! Return intent_id instead of WAV
+            intent_id, wav_filename, text_response = intent_result
             
-            # Load pre-recorded WAV
-            canned_wav = self.intent_detector.load_canned_response(wav_file_path)
+            # ⚡ FAST PATH: Just return intent_id + metadata
+            # Client will play the pre-cached WAV file locally
+            timings['intent_id'] = intent_id
+            timings['intent_wav_file'] = wav_filename
+            timings['canned_response'] = True
+            timings['llm'] = {'total': 0.0}  # Skipped
+            timings['tts'] = {'total': 0.0}  # Skipped
+            timings['total'] = time.time() - start
+            timings['user_text'] = user_text
+            timings['reply'] = text_response
             
-            if canned_wav is not None:
-                # Success! Return canned response
-                timings['intent'] = intent_name
-                timings['canned_response'] = True
-                timings['llm'] = {'total': 0.0}  # Skipped
-                timings['tts'] = {'total': 0.0}  # Skipped
-                timings['total'] = time.time() - start
-                timings['user_text'] = user_text
-                timings['reply'] = text_response
-                
-                print(f"⚡ CANNED RESPONSE: {intent_name} ({timings['total']:.2f}s)")
-                return canned_wav, timings
-            else:
-                # File not found, fallback to LLM
-                print(f"⚠️ Canned response file not found, falling back to LLM")
+            print(f"⚡ INTENT MATCH (ID: {intent_id}): {wav_filename} - {text_response[:30]}...")
+            print(f"   Total time: {timings['total']:.2f}s (NO LLM/TTS overhead!)")
+            
+            # Return special response: intent_id as bytes (1 byte is enough: 0-3)
+            intent_code = bytes([intent_id])  # Convert intent_id (0-3) to single byte
+            return intent_code, timings
         
         # 2. LLM with RAG - Generate response (fallback if no intent match)
         reply, llm_timings = self.llm_service.chat(user_text)
